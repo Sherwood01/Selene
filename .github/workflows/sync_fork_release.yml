@@ -24,13 +24,23 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      # 步骤 3：添加上游仓库
+      # 步骤 3：安装 GitHub CLI
+      - name: Install GitHub CLI
+        run: |
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update
+          sudo apt install gh -y
+
+      # 步骤 4：添加上游仓库
       - name: Add Upstream Remote
         run: |
           git remote add upstream https://github.com/MoonTechLab/Selene.git || true
           git fetch upstream --tags -f
 
-      # 步骤 4：同步安全的 Tags
+      # 步骤 5：同步安全的 Tags
       - name: Sync Safe Tags
         run: |
           # 获取上游所有 Tags
@@ -50,7 +60,7 @@ jobs:
             fi
           done
 
-      # 步骤 5：强制同步 Release Assets
+      # 步骤 6：强制同步 Release Assets
       - name: Force Sync Release Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -103,52 +113,11 @@ jobs:
             if [ "$(ls -A release_assets/$TAG 2>/dev/null)" ]; then
               echo "🚀 强制创建 Release: $TAG"
               
-              # 方法1：使用 gh release create
+              # 使用 GitHub CLI 创建 Release
               gh release create "$TAG" \
                 --title "$TAG (Synced from Upstream)" \
                 --notes "Automatically synced from MoonTechLab/Selene" \
                 "release_assets/$TAG/"* && echo "✅ Release 创建成功" || echo "❌ Release 创建失败"
-                
-              # 如果方法1失败，尝试方法2：使用 GitHub API
-              if [ $? -ne 0 ]; then
-                echo "🔄 尝试使用 API 创建 Release: $TAG"
-                RELEASE_DATA=$(cat << EOF
-                {
-                  "tag_name": "$TAG",
-                  "name": "$TAG (Synced from Upstream)",
-                  "body": "Automatically synced from MoonTechLab/Selene",
-                  "draft": false,
-                  "prerelease": false
-                }
-EOF
-                )
-                # 创建 Release
-                RELEASE_ID=$(curl -s -X POST \
-                  -H "Authorization: token $GITHUB_TOKEN" \
-                  -H "Accept: application/vnd.github.v3+json" \
-                  "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
-                  -d "$RELEASE_DATA" | jq -r '.id')
-                  
-                if [ "$RELEASE_ID" != "null" ]; then
-                  echo "✅ API 创建 Release 成功，ID: $RELEASE_ID"
-                  
-                  # 上传 Assets
-                  for ASSET_FILE in release_assets/$TAG/*; do
-                    if [ -f "$ASSET_FILE" ]; then
-                      ASSET_NAME=$(basename "$ASSET_FILE")
-                      echo "⬆️ 上传 Asset: $ASSET_NAME"
-                      curl -s -X POST \
-                        -H "Authorization: token $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github.v3+json" \
-                        -H "Content-Type: application/octet-stream" \
-                        "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
-                        --data-binary @"$ASSET_FILE" && echo "✅ 上传成功" || echo "❌ 上传失败"
-                    fi
-                  done
-                else
-                  echo "❌ API 创建 Release 失败"
-                fi
-              fi
             else
               echo "❌ 没有可用的 Assets 文件"
             fi
@@ -156,7 +125,7 @@ EOF
             echo ""
           done
 
-      # 步骤 6：清理和验证
+      # 步骤 7：清理和验证
       - name: Cleanup and Verify
         run: |
           rm -rf release_assets
