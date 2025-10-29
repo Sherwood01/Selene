@@ -24,45 +24,49 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
 
-      # 步骤 3：添加上游仓库并强制获取所有 Tags
-      - name: Add Upstream Remote and Fetch Tags
+      # 步骤 3：添加上游仓库
+      - name: Add Upstream Remote
         run: |
           git remote add upstream https://github.com/MoonTechLab/Selene.git || true
           git fetch upstream --tags -f
 
-      # 步骤 4：调试 - 显示所有 Tags 信息
-      - name: Debug Tags Information
-        run: |
-          echo "=== 本地 Tags ==="
-          git tag -l | sort -V
-          echo "=== 上游 Tags ==="
-          git ls-remote --tags upstream | awk -F/ '{print $3}' | sort -V
-          echo "=== 差异分析 ==="
-          git tag -l | sort -V > local_tags.txt
-          git ls-remote --tags upstream | awk -F/ '{print $3}' | sort -V > upstream_tags.txt
-          echo "本地有但上游没有:"
-          comm -23 local_tags.txt upstream_tags.txt || echo "无"
-          echo "上游有但本地没有:"
-          comm -13 local_tags.txt upstream_tags.txt || echo "无"
-
-      # 步骤 5：同步所有 Tags（简化版）
-      - name: Sync All Tags
-        run: |
-          # 直接推送所有上游 Tags（让 Git 自动处理冲突）
-          git push origin --tags --force-if-includes
-
-      # 步骤 6：检查并同步 Release Assets
-      - name: Sync Release Assets
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # 步骤 4：逐个推送安全的 Tags（跳过包含 workflow 文件的 Tags）
+      - name: Sync Safe Tags Individually
         run: |
           # 获取上游所有 Tags
           UPSTREAM_TAGS=$(git ls-remote --tags upstream | awk -F/ '{print $3}' | sort -V)
           
+          echo "发现上游 Tags:"
+          echo "$UPSTREAM_TAGS"
+          
+          # 逐个检查并推送安全的 Tags
           for TAG in $UPSTREAM_TAGS; do
+            echo "检查 Tag: $TAG"
+            
+            # 检查该 Tag 是否包含 .github/workflows/ 文件
+            if git diff --quiet $TAG -- .github/workflows/ 2>/dev/null; then
+              echo "✅ 推送安全的 Tag: $TAG"
+              git push origin "refs/tags/$TAG" || echo "⚠️ 推送失败: $TAG"
+            else
+              echo "❌ 跳过 Tag $TAG（包含 workflow 文件，无权限修改）"
+            fi
+          done
+
+      # 步骤 5：同步 Release Assets（仅针对已同步的 Tags）
+      - name: Sync Release Assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 获取所有本地 Tags（已成功同步的）
+          LOCAL_TAGS=$(git tag -l | sort -V)
+          
+          echo "已同步的 Tags:"
+          echo "$LOCAL_TAGS"
+          
+          for TAG in $LOCAL_TAGS; do
             echo "处理 Tag: $TAG"
             
-            # 检查本地是否已有该 Release
+            # 检查是否已存在 Release
             EXISTING_RELEASE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
               "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" | jq -r '.id')
             
@@ -73,12 +77,8 @@ jobs:
 
             # 检查上游 Release 信息
             UPSTREAM_URL="https://api.github.com/repos/MoonTechLab/Selene/releases/tags/$TAG"
-            echo "查询上游 API: $UPSTREAM_URL"
-            
             RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$UPSTREAM_URL")
-            echo "API 响应:"
-            echo "$RESPONSE" | jq . || echo "JSON 解析失败，原始响应: $RESPONSE"
-
+            
             # 检查是否有 Assets
             if echo "$RESPONSE" | jq -e '.assets? | length > 0' >/dev/null 2>&1; then
               echo "发现 Assets，开始下载: $TAG"
@@ -87,14 +87,14 @@ jobs:
               # 下载 Assets
               echo "$RESPONSE" | jq -r '.assets[].browser_download_url' | while read ASSET_URL; do
                 if [ -n "$ASSET_URL" ]; then
-                  echo "下载: $ASSET_URL"
-                  curl -L -o "release_assets/$TAG/$(basename "$ASSET_URL")" "$ASSET_URL" || echo "下载失败: $ASSET_URL"
+                  echo "下载: $(basename "$ASSET_URL")"
+                  curl -L -o "release_assets/$TAG/$(basename "$ASSET_URL")" "$ASSET_URL" || echo "下载失败，继续处理"
                 fi
               done
 
               # 创建 Release
               echo "创建 Release: $TAG"
-              if [ "$(ls -A release_assets/$TAG)" ]; then
+              if [ "$(ls -A release_assets/$TAG 2>/dev/null)" ]; then
                 gh release create "$TAG" \
                   --title "$TAG (Synced from Upstream)" \
                   --notes "Automatically synced from MoonTechLab/Selene" \
@@ -103,14 +103,15 @@ jobs:
                 echo "没有可用的 Assets 文件"
               fi
             else
-              echo "Tag $TAG 没有 Assets 或 API 调用失败"
+              echo "Tag $TAG 没有 Assets"
             fi
           done
 
-      # 步骤 7：验证同步结果
-      - name: Verify Sync Results
+      # 步骤 6：验证结果
+      - name: Verify Results
         run: |
-          echo "=== 同步完成验证 ==="
-          echo "本地 Tags:"
+          echo "=== 同步完成 ==="
+          echo "成功同步的 Tags:"
           git tag -l | sort -V
-          echo "请检查 https://github.com/$GITHUB_REPOSITORY/tags 确认所有 Tags 已同步"
+          echo "请检查 https://github.com/$GITHUB_REPOSITORY/tags 确认 Tags 已同步"
+          echo "请检查 https://github.com/$GITHUB_REPOSITORY/releases 确认 Releases 已创建"
