@@ -60,7 +60,7 @@ jobs:
             fi
           done
 
-      # 步骤 6：强制同步 Release Assets
+      # 步骤 6：彻底清理并强制同步 Release
       - name: Force Sync Release Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,7 +72,7 @@ jobs:
           echo "$LOCAL_TAGS"
           
           for TAG in $LOCAL_TAGS; do
-            echo "=== 强制处理 Tag: $TAG ==="
+            echo "=== 彻底处理 Tag: $TAG ==="
             
             # 检查上游 Release 信息
             UPSTREAM_URL="https://api.github.com/repos/MoonTechLab/Selene/releases/tags/$TAG"
@@ -95,9 +95,39 @@ jobs:
 
             echo "✅ 发现上游 Assets ($UPSTREAM_ASSETS_COUNT 个): $TAG"
             
-            # 强制删除本地已存在的 Release（如果有）
-            echo "🗑️ 强制删除本地 Release: $TAG"
-            gh release delete "$TAG" --yes 2>/dev/null && echo "✅ 删除成功" || echo "ℹ️ 无需删除（Release 不存在）"
+            # 方法1：使用 API 彻底检查并删除 Release
+            echo "🔍 检查 Release 状态..."
+            LOCAL_RELEASE_URL="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG"
+            LOCAL_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$LOCAL_RELEASE_URL")
+            LOCAL_RELEASE_ID=$(echo "$LOCAL_RESPONSE" | jq -r '.id' | grep -v null || echo "")
+            
+            if [ -n "$LOCAL_RELEASE_ID" ]; then
+              echo "🗑️ 通过 API 删除 Release: $TAG (ID: $LOCAL_RELEASE_ID)"
+              curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$LOCAL_RELEASE_ID" && \
+                echo "✅ API 删除成功" || echo "❌ API 删除失败"
+            else
+              echo "ℹ️ 通过 API 检测 Release 不存在"
+            fi
+
+            # 方法2：使用 gh CLI 再次尝试删除
+            echo "🗑️ 使用 gh CLI 删除 Release: $TAG"
+            gh release delete "$TAG" --yes 2>/dev/null && echo "✅ gh 删除成功" || echo "ℹ️ gh 删除失败（可能不存在）"
+            
+            # 等待一下确保删除完成
+            sleep 2
+            
+            # 再次检查 Release 状态
+            echo "🔍 再次检查 Release 状态..."
+            LOCAL_RESPONSE_AFTER=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$LOCAL_RELEASE_URL")
+            LOCAL_RELEASE_ID_AFTER=$(echo "$LOCAL_RESPONSE_AFTER" | jq -r '.id' | grep -v null || echo "")
+            
+            if [ -n "$LOCAL_RELEASE_ID_AFTER" ]; then
+              echo "❌ Release 仍然存在，跳过: $TAG"
+              continue
+            fi
+
+            echo "✅ Release 确认已删除: $TAG"
             
             # 下载 Assets
             mkdir -p "release_assets/$TAG"
@@ -109,15 +139,60 @@ jobs:
               fi
             done
 
-            # 强制创建 Release
+            # 强制创建 Release（使用 API 方法）
             if [ "$(ls -A release_assets/$TAG 2>/dev/null)" ]; then
-              echo "🚀 强制创建 Release: $TAG"
+              echo "🚀 使用 API 创建 Release: $TAG"
               
-              # 使用 GitHub CLI 创建 Release
-              gh release create "$TAG" \
-                --title "$TAG (Synced from Upstream)" \
-                --notes "Automatically synced from MoonTechLab/Selene" \
-                "release_assets/$TAG/"* && echo "✅ Release 创建成功" || echo "❌ Release 创建失败"
+              # 创建 Release 数据
+              RELEASE_DATA=$(cat << EOF
+{
+  "tag_name": "$TAG",
+  "name": "$TAG (Synced from Upstream)",
+  "body": "Automatically synced from MoonTechLab/Selene",
+  "draft": false,
+  "prerelease": false
+}
+EOF
+              )
+              
+              # 创建 Release
+              RELEASE_RESPONSE=$(curl -s -X POST \
+                -H "Authorization: token $GITHUB_TOKEN" \
+                -H "Accept: application/vnd.github.v3+json" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" \
+                -d "$RELEASE_DATA")
+              
+              RELEASE_ID=$(echo "$RELEASE_RESPONSE" | jq -r '.id')
+              
+              if [ "$RELEASE_ID" != "null" ]; then
+                echo "✅ API 创建 Release 成功，ID: $RELEASE_ID"
+                
+                # 上传 Assets
+                for ASSET_FILE in release_assets/$TAG/*; do
+                  if [ -f "$ASSET_FILE" ]; then
+                    ASSET_NAME=$(basename "$ASSET_FILE")
+                    echo "⬆️ 上传 Asset: $ASSET_NAME"
+                    
+                    UPLOAD_RESPONSE=$(curl -s -X POST \
+                      -H "Authorization: token $GITHUB_TOKEN" \
+                      -H "Accept: application/vnd.github.v3+json" \
+                      -H "Content-Type: application/octet-stream" \
+                      "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
+                      --data-binary @"$ASSET_FILE")
+                    
+                    UPLOAD_SUCCESS=$(echo "$UPLOAD_RESPONSE" | jq -r '.id' | grep -v null || echo "")
+                    if [ -n "$UPLOAD_SUCCESS" ]; then
+                      echo "✅ 上传成功: $ASSET_NAME"
+                    else
+                      echo "❌ 上传失败: $ASSET_NAME"
+                    fi
+                  fi
+                done
+              else
+                echo "❌ API 创建 Release 失败"
+                echo "响应: $RELEASE_RESPONSE"
+              fi
             else
               echo "❌ 没有可用的 Assets 文件"
             fi
