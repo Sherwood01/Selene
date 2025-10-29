@@ -1,12 +1,17 @@
-name: Sync Safe Releases Only
+name: Auto Sync Fork with Releases
 
 on:
   schedule:
     - cron: '0 2 * * *'  # 每天 UTC 2:00（北京时间 10:00）
   workflow_dispatch:     # 支持手动触发
 
+env:
+  # 🔧 在这里配置你的上游仓库信息
+  UPSTREAM_REPO: "MoonTechLab/Selene"  # 例如: "MoonTechLab/Selene"
+  UPSTREAM_URL: "https://github.com/MoonTechLab/Selene.git"
+
 jobs:
-  sync-safe-releases:
+  sync-fork:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -24,7 +29,7 @@ jobs:
 
       - name: Add Upstream
         run: |
-          git remote add upstream https://github.com/MoonTechLab/Selene.git || true
+          git remote add upstream ${{ env.UPSTREAM_URL }} || true
           git fetch upstream --tags
 
       - name: Install Dependencies
@@ -36,7 +41,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "=== 开始同步安全的 Tags 和 Releases ==="
+          echo "=== 开始同步 ${{ env.UPSTREAM_REPO }} ==="
           
           # 获取所有上游 Tags
           git fetch upstream --tags
@@ -50,7 +55,7 @@ jobs:
           for TAG in $UPSTREAM_TAGS; do
             echo "🔍 处理 Tag: $TAG"
             
-            # 检查这个 Tag 是否包含 workflow 文件
+            # 检查这个 Tag 是否包含 workflow 文件（安全过滤）
             if git ls-tree -r upstream/$TAG --name-only | grep -q "^\.github/workflows/"; then
               echo "❌ 跳过 $TAG (包含 workflow 文件)"
               echo ""
@@ -64,7 +69,7 @@ jobs:
             git push origin "refs/tags/$TAG" 2>/dev/null || echo "ℹ️ Tag 可能已存在"
             
             # 检查上游是否有 Release
-            UPSTREAM_RELEASE_URL="https://api.github.com/repos/MoonTechLab/Selene/releases/tags/$TAG"
+            UPSTREAM_RELEASE_URL="https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/releases/tags/$TAG"
             UPSTREAM_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$UPSTREAM_RELEASE_URL")
             UPSTREAM_RELEASE_ID=$(echo "$UPSTREAM_RESPONSE" | jq -r '.id // empty')
             
@@ -115,13 +120,12 @@ jobs:
               # 使用 GitHub API 创建 Release
               RELEASE_DATA='{
                 "tag_name": "'$TAG'",
-                "name": "'$TAG' (Synced from Upstream)",
-                "body": "Automatically synced from MoonTechLab/Selene",
+                "name": "'$TAG' (Synced from ${{ env.UPSTREAM_REPO }})",
+                "body": "Automatically synced from ${{ env.UPSTREAM_REPO }}",
                 "draft": false,
                 "prerelease": false
               }'
               
-              # 创建 Release
               CREATE_RESPONSE=$(curl -s -X POST \
                 -H "Authorization: token $GITHUB_TOKEN" \
                 -H "Accept: application/vnd.github.v3+json" \
