@@ -30,88 +30,114 @@ jobs:
           git remote add upstream https://github.com/MoonTechLab/Selene.git || true
           git fetch upstream --tags -f
 
-      # 步骤 4：逐个推送安全的 Tags（跳过包含 workflow 文件的 Tags）
-      - name: Sync Safe Tags Individually
+      # 步骤 4：同步安全的 Tags
+      - name: Sync Safe Tags
         run: |
           # 获取上游所有 Tags
           UPSTREAM_TAGS=$(git ls-remote --tags upstream | awk -F/ '{print $3}' | sort -V)
           
-          echo "发现上游 Tags:"
+          echo "上游 Tags:"
           echo "$UPSTREAM_TAGS"
           
           # 逐个检查并推送安全的 Tags
           for TAG in $UPSTREAM_TAGS; do
-            echo "检查 Tag: $TAG"
-            
             # 检查该 Tag 是否包含 .github/workflows/ 文件
             if git diff --quiet $TAG -- .github/workflows/ 2>/dev/null; then
               echo "✅ 推送安全的 Tag: $TAG"
-              git push origin "refs/tags/$TAG" || echo "⚠️ 推送失败: $TAG"
+              git push origin "refs/tags/$TAG" 2>/dev/null || echo "ℹ️ Tag 可能已存在: $TAG"
             else
-              echo "❌ 跳过 Tag $TAG（包含 workflow 文件，无权限修改）"
+              echo "❌ 跳过 Tag $TAG（包含 workflow 文件）"
             fi
           done
 
-      # 步骤 5：同步 Release Assets（仅针对已同步的 Tags）
+      # 步骤 5：智能同步 Release Assets
       - name: Sync Release Assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 获取所有本地 Tags（已成功同步的）
+          # 获取所有本地 Tags
           LOCAL_TAGS=$(git tag -l | sort -V)
           
-          echo "已同步的 Tags:"
+          echo "本地 Tags:"
           echo "$LOCAL_TAGS"
           
           for TAG in $LOCAL_TAGS; do
-            echo "处理 Tag: $TAG"
+            echo "=== 处理 Tag: $TAG ==="
             
-            # 检查是否已存在 Release
-            EXISTING_RELEASE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG" | jq -r '.id')
+            # 检查本地是否已有该 Tag 的 Release
+            LOCAL_RELEASE_URL="https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$TAG"
+            LOCAL_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$LOCAL_RELEASE_URL")
+            LOCAL_HAS_RELEASE=$(echo "$LOCAL_RESPONSE" | jq -r '.id' | grep -v null || echo "")
             
-            if [ "$EXISTING_RELEASE" != "null" ]; then
-              echo "Release 已存在: $TAG"
-              continue
+            if [ -n "$LOCAL_HAS_RELEASE" ]; then
+              echo "✅ 本地已有 Release: $TAG"
+              # 检查本地 Release 是否有 Assets
+              LOCAL_ASSETS_COUNT=$(echo "$LOCAL_RESPONSE" | jq -r '.assets | length')
+              if [ "$LOCAL_ASSETS_COUNT" -gt 0 ]; then
+                echo "✅ 本地 Release 已有 $LOCAL_ASSETS_COUNT 个 Assets"
+                continue
+              else
+                echo "ℹ️ 本地 Release 没有 Assets，检查上游..."
+              fi
+            else
+              echo "ℹ️ 本地没有 Release: $TAG"
             fi
 
             # 检查上游 Release 信息
             UPSTREAM_URL="https://api.github.com/repos/MoonTechLab/Selene/releases/tags/$TAG"
-            RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$UPSTREAM_URL")
+            UPSTREAM_RESPONSE=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "$UPSTREAM_URL")
             
-            # 检查是否有 Assets
-            if echo "$RESPONSE" | jq -e '.assets? | length > 0' >/dev/null 2>&1; then
-              echo "发现 Assets，开始下载: $TAG"
-              mkdir -p "release_assets/$TAG"
-              
-              # 下载 Assets
-              echo "$RESPONSE" | jq -r '.assets[].browser_download_url' | while read ASSET_URL; do
-                if [ -n "$ASSET_URL" ]; then
-                  echo "下载: $(basename "$ASSET_URL")"
-                  curl -L -o "release_assets/$TAG/$(basename "$ASSET_URL")" "$ASSET_URL" || echo "下载失败，继续处理"
-                fi
-              done
-
-              # 创建 Release
-              echo "创建 Release: $TAG"
-              if [ "$(ls -A release_assets/$TAG 2>/dev/null)" ]; then
-                gh release create "$TAG" \
-                  --title "$TAG (Synced from Upstream)" \
-                  --notes "Automatically synced from MoonTechLab/Selene" \
-                  "release_assets/$TAG/"* || echo "Release 创建失败"
-              else
-                echo "没有可用的 Assets 文件"
-              fi
-            else
-              echo "Tag $TAG 没有 Assets"
+            # 检查上游是否有该 Release
+            UPSTREAM_EXISTS=$(echo "$UPSTREAM_RESPONSE" | jq -r '.id' | grep -v null || echo "")
+            
+            if [ -z "$UPSTREAM_EXISTS" ]; then
+              echo "❌ 上游没有 Tag $TAG 的 Release"
+              continue
             fi
+
+            # 检查上游是否有 Assets
+            UPSTREAM_ASSETS_COUNT=$(echo "$UPSTREAM_RESPONSE" | jq -r '.assets | length')
+            if [ "$UPSTREAM_ASSETS_COUNT" -eq 0 ]; then
+              echo "ℹ️ 上游 Release 没有 Assets: $TAG"
+              continue
+            fi
+
+            echo "✅ 发现上游 Assets ($UPSTREAM_ASSETS_COUNT 个): $TAG"
+            
+            # 下载 Assets
+            mkdir -p "release_assets/$TAG"
+            echo "$UPSTREAM_RESPONSE" | jq -r '.assets[].browser_download_url' | while read ASSET_URL; do
+              if [ -n "$ASSET_URL" ]; then
+                FILENAME="release_assets/$TAG/$(basename "$ASSET_URL")"
+                echo "⬇️ 下载: $(basename "$ASSET_URL")"
+                curl -L -o "$FILENAME" "$ASSET_URL" && echo "✅ 下载成功" || echo "❌ 下载失败"
+              fi
+            done
+
+            # 创建或更新 Release
+            if [ "$(ls -A release_assets/$TAG 2>/dev/null)" ]; then
+              if [ -n "$LOCAL_HAS_RELEASE" ]; then
+                echo "🔄 更新现有 Release: $TAG"
+                # 删除现有 Release 并重新创建（或使用 gh release upload）
+                gh release delete "$TAG" --yes 2>/dev/null || echo "ℹ️ 删除失败或无需删除"
+              fi
+              
+              echo "🚀 创建 Release: $TAG"
+              gh release create "$TAG" \
+                --title "$TAG (Synced from Upstream)" \
+                --notes "Automatically synced from MoonTechLab/Selene" \
+                "release_assets/$TAG/"* && echo "✅ Release 创建成功" || echo "❌ Release 创建失败"
+            else
+              echo "❌ 没有可用的 Assets 文件"
+            fi
+            
+            echo ""
           done
 
-      # 步骤 6：验证结果
-      - name: Verify Results
+      # 步骤 6：清理和验证
+      - name: Cleanup and Verify
         run: |
+          rm -rf release_assets
           echo "=== 同步完成 ==="
-          echo "成功同步的 Tags:"
-          git tag -l | sort -V
-          echo "请检查 https://github.com/$GITHUB_REPOSITORY/tags 确认 Tags 已同步"
-          echo "请检查 https://github.com/$GITHUB_REPOSITORY/releases 确认 Releases 已创建"
+          echo "✅ Tags 数量: $(git tag -l | wc -l)"
+          echo "📊 请检查: https://github.com/$GITHUB_REPOSITORY/releases"
