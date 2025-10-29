@@ -1,4 +1,4 @@
-name: Auto Sync Fork and Releases
+name: Auto Sync Fork and Releases 
 
 on:
   schedule:
